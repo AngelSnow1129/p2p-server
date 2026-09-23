@@ -15,6 +15,15 @@ identity.json
 .env
 .env.local
 
+# SQLite 数据库与 WAL 附属文件（本地运行/裸机测试可能产生在仓库目录）
+*.db
+*.db-wal
+*.db-shm
+
+# Cloudflare/Worker 本地产物与状态
+.wrangler/
+node_modules/
+
 # 测试与覆盖率
 *.out
 coverage.txt

@@ -49,8 +49,34 @@ readonly GH_DOWNLOAD_BASE="https://github.com/${GH_OWNER}/${GH_REPO}/releases/do
 
 # 脚本自身可能来自管道（/dev/stdin），此时没有「脚本目录」可言；
 # 因此 unit / env 样例一律以「归档内自带」为权威来源，仓库路径只作本地回退。
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
-REPO_ROOT="$( [ -n "$SCRIPT_DIR" ] && cd "${SCRIPT_DIR}/.." 2>/dev/null && pwd || true )"
+#
+# 这里不用任何 `A && B || C`（包括命令替换内部）：管道执行时 cd 会失败，
+# 该模式在「A 真但 B 失败」时会错误地走到 C（SC2015）。用函数 + if 显式处理。
+#
+# 关键：必须用「能否 cd 进去」来判定目录有效，而不是 `[ -d ]`。
+_resolve_dir() {
+    local target="$1" out
+    if out="$(cd "$target" 2>/dev/null && pwd)"; then
+        printf '%s\n' "$out"
+    fi
+}
+
+# 仅当脚本确实从一个**真实文件**运行时才解析目录。
+#
+# 管道执行（curl | bash）时 $0 是字面量 "bash"，dirname 是 "."（当前工作目录），
+# 若不加判断会把 cwd 误当成脚本目录。因此必须先确认 ${BASH_SOURCE[0]}
+# 指向一个真实存在的常规文件（不是 "bash"、不是 /dev/fd/*）。
+SCRIPT_DIR=""
+REPO_ROOT=""
+_b0="${BASH_SOURCE[0]:-}"
+if [ -f "$_b0" ] && [ "$_b0" != "bash" ]; then
+    SCRIPT_DIR="$(_resolve_dir "$(dirname "$_b0")")"
+    # 仅当脚本从真实文件运行时才推导仓库根；管道场景下两者都为空，
+    # 后续 locate_asset 只用归档内文件，不依赖 REPO_ROOT。
+    if [ -n "$SCRIPT_DIR" ]; then
+        REPO_ROOT="$(_resolve_dir "${SCRIPT_DIR}/..")"
+    fi
+fi
 
 # ---- 输出 ------------------------------------------------------------------
 
@@ -274,8 +300,11 @@ extract_archive() {
     # 归档内有一层目录，定位含 server 二进制的那层。
     SRC_DIR="$(find "$d" -maxdepth 2 -type f -name "${SERVER_BIN}" \
         -exec dirname {} \; 2>/dev/null | head -n1)"
-    [ -n "$SRC_DIR" ] && [ -f "${SRC_DIR}/${SERVER_BIN}" ] \
-        || die "归档内未找到 ${SERVER_BIN}" "归档结构不符合预期。"
+    # 用 if 而非 `[ ... ] && [ ... ] || die`：后者在「第一个条件为真、第二个为假」
+    # 时仍会触发 die（SC2015：A && B || C 不是 if-then-else）。
+    if [ -z "$SRC_DIR" ] || [ ! -f "${SRC_DIR}/${SERVER_BIN}" ]; then
+        die "归档内未找到 ${SERVER_BIN}" "归档结构不符合预期。"
+    fi
     ok "已解包，含 ${SERVER_BIN} / ${CLIENT_BIN}"
 }
 
@@ -458,7 +487,11 @@ do_uninstall() {
     if [ "$PURGE" = "1" ]; then
         warn "purge：正在删除数据与配置（不可恢复）"
         rm -rf "$DATA_DIR" "$CONF_DIR"
-        userdel "$SVC_USER" 2>/dev/null && ok "已删除用户 ${SVC_USER}" || true
+        # userdel 在「用户不存在」时返回非零；这是预期情况，不该让该行报错。
+        # 用 if 显式区分，避免 `cmd && ok || true` 的 SC2015 歧义。
+        if userdel "$SVC_USER" 2>/dev/null; then
+            ok "已删除用户 ${SVC_USER}"
+        fi
         ok "已删除 ${DATA_DIR} 与 ${CONF_DIR}"
     else
         info "已保留：${DATA_DIR}（数据）、${CONF_DIR}（配置）"

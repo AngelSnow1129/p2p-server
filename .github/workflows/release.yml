@@ -4,7 +4,7 @@
 # 且每个 release 附一份 SHA256SUMS —— deploy/install.sh 默认强制校验它。
 #
 # 版本号由 Makefile 从 VERSION 文件读取，因此打 tag 前需让 VERSION 与 tag 一致
-# （见 README 的发布步骤）。
+# （见 README / DESIGN 的发布步骤）。
 
 name: release
 
@@ -16,18 +16,24 @@ on:
   # 允许在 Actions 页面手动重跑（不重新打 tag）。
   workflow_dispatch:
 
+# release 互不取消：不同 tag 是不同发布，绝不能让新 tag 取消正在上传的旧 tag。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write   # softprops/action-gh-release 创建/上传 release 所需
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.25'
           cache: true
@@ -51,7 +57,7 @@ jobs:
             | grep -q 'deploy/systemd/p2psession.service'
 
       - name: Create GitHub Release and upload assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           # 预发布 tag（含连字符，如 -rc1）标记为 prerelease。
           prerelease: ${{ contains(github.ref_name, '-') }}
