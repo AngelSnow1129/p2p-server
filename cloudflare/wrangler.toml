@@ -1,0 +1,39 @@
+# Cloudflare Workers 部署配置（配合 worker.js 使用）。
+#
+# 部署：
+#   cd cloudflare
+#   npx wrangler secret put P2PS_TICKET_SECRET   # 票据 HMAC 密钥（必配）
+#   npx wrangler deploy
+#
+# Durable Object 说明：一个 Session 对应一个 DO 实例，由
+# `env.SESSION_HUB.idFromName(sessionId)` 稳定派生——同一 sessionId 永远
+# 命中同一实例，成员表因此不会分裂。DO 会自动在多区域间做单实例路由。
+
+name = "p2psession-relay"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# Ed25519（crypto.subtle.verify / sign）在 Workers 上需要 WebCrypto 支持，
+# 该 flag 保证 nodejs_compat 不与 WebCrypto 冲突。
+compatibility_flags = ["nodejs_compat"]
+
+# Durable Object 绑定：worker.js 通过 env.SESSION_HUB 访问。
+[[durable_objects.bindings]]
+name = "SESSION_HUB"
+class_name = "SessionHub"
+
+# DO 的迁移声明（首次部署时必须；之后新增版本用新增条目）。
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SessionHub"]
+
+# 环境变量（非敏感项；敏感项请用 `wrangler secret put`）。
+[vars]
+# 票据有效期等由代码内常量控制；此处仅放可公开的配置。
+LOG_LEVEL = "info"
+
+# 生产环境示例（用 --env production 部署）：
+# [env.production]
+# name = "p2psession-relay-prod"
+# [env.production.vars]
+# LOG_LEVEL = "warn"

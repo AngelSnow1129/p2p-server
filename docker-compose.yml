@@ -1,0 +1,75 @@
+# p2psession 容器编排：单实例服务器 + 可选的 Cloudflare 隧道。
+#
+# 仅启动服务器（本地/内网）：
+#   docker compose up -d --build
+#
+# 加上 Cloudflare 临时隧道（零账号，启动后从日志取 https://xxx.trycloudflare.com）：
+#   docker compose --profile quick up -d --build
+#   docker compose logs cloudflared-quick | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com'
+#
+# 使用自有域名的命名隧道（生产推荐）：
+#   export CLOUDFLARE_TUNNEL_TOKEN=xxxx
+#   docker compose --profile named up -d --build
+#
+# 关于 P2PS_TICKET_KEY：多实例部署必须显式配置同一密钥，否则连接票据
+# 无法跨实例验证。单实例留空即可（启动时随机生成）。
+#
+# 关于持久化：镜像默认 P2PS_STORAGE_BACKEND=sqlite，数据落在 /data 卷，
+# 因此 `docker compose restart` / `up -d --build` 后**会话仍在**。
+# 想回到「重启即清空」的纯内存模式：
+#   echo 'P2PS_STORAGE_BACKEND=memory' >> .env
+
+services:
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: p2psession-server:latest
+    restart: unless-stopped
+    env_file:
+      # 可选：复制 .env.example 为 .env 做覆盖；不存在时用默认值。
+      - path: .env
+        required: false
+    ports:
+      - "${P2PS_HOST_PORT:-60000}:60000"
+    volumes:
+      # 具名卷：SQLite 数据库文件在此，容器重建不丢数据。
+      # 想直接看到文件，可改成绑定挂载 ./data:/data（注意属主需为容器内
+      # 的 uid 100 即 app 用户，否则 SQLite 会因无写权限启动失败）。
+      - p2p-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:60000/v1/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # 零配置临时隧道（演示/内测）：docker compose --profile quick up
+  cloudflared-quick:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    profiles: ["quick"]
+    depends_on:
+      relay:
+        condition: service_healthy
+    command: tunnel --no-autoupdate --url http://relay:60000
+
+  # 固定域名隧道（生产）：docker compose --profile named up
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    profiles: ["named"]
+    depends_on:
+      relay:
+        condition: service_healthy
+    environment:
+      # 不用 ${VAR:?} 强制插值：compose 会对所有服务做变量展开（与 profile 无关），
+      # 那会导致只跑 quick profile 时也强制要求该变量。留空时 cloudflared 自行报错。
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
+
+volumes:
+  # 具名卷由 Docker 管理，默认落在 /var/lib/docker/volumes/。
+  # 备份：docker run --rm -v p2psession_p2p-data:/d -v "$PWD:/b" alpine \
+  #         tar czf /b/p2p-backup.tgz -C /d .
+  p2p-data:

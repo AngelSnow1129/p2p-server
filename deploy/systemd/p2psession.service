@@ -1,0 +1,110 @@
+[Unit]
+Description=p2psession P2P session relay server
+Documentation=https://github.com/example/p2psession
+# 会话是短生命周期状态，但 SQLite 持久化后「排到队尾重启」没有意义，
+# 因此只要系统在跑就应当可用。
+After=network-online.target
+Wants=network-online.target
+
+# 重启限流：5 分钟内最多 10 次，避免配置错误时无限重启刷日志。
+#
+# 这两项属于 [Unit] 而非 [Service] —— `StartLimitIntervalSec` 放在
+# [Service] 会被 systemd 忽略（systemd-analyze verify 会明确报
+# "Unknown key name"），而 `StartLimitBurst` 之所以看似生效，
+# 只是因为 [Service] 里保留了一个**已废弃**的同名别名。
+# 两个都写在 [Unit] 才是正确且面向未来的做法。
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+# 专用系统用户：无登录 shell、无家目录。
+# 由 `make install` 创建（useradd --system ...）。
+User=p2psession
+Group=p2psession
+
+# ---- 配置 -------------------------------------------------------------------
+# 敏感项（P2PS_TICKET_KEY / P2PS_ADMIN_TOKEN）放在这里，文件权限 0640
+# 且属主 root:p2psession，避免同机其他用户读取。
+EnvironmentFile=-/etc/p2psession/p2psession.env
+
+# EnvironmentFile 会覆盖下面这些默认值，因此这里给的是「未配置也能正确跑」的兜底。
+Environment=P2PS_LISTEN=:60000
+# 持久化：StateDirectory 指定的目录由 systemd 创建并保证属主正确。
+Environment=P2PS_STORAGE_BACKEND=sqlite
+Environment=P2PS_SQLITE_PATH=/var/lib/p2psession/p2psession.db
+# 位于反向代理/隧道之后时取真实客户端 IP（限流按 IP 生效）。
+Environment=P2PS_TRUST_PROXY_HEADERS=true
+
+ExecStart=/usr/local/bin/p2psession-server
+# 收到 SIGTERM 后给 20 秒做在途请求与 SQLite 收尾（代码里是 10 秒优雅退出）。
+TimeoutStopSec=20
+
+# ---- 重启策略 ---------------------------------------------------------------
+Restart=on-failure
+RestartSec=2s
+# 重启次数上限见 [Unit] 段的 StartLimitIntervalSec / StartLimitBurst。
+
+# ---- 文件系统加固 -----------------------------------------------------------
+# 让 systemd 管理 /var/lib/p2psession：自动创建、属主正确、
+# 服务停止时也不删除。这样 unit 不必再写 ReadWritePaths。
+StateDirectory=p2psession
+StateDirectoryMode=0750
+
+# 根文件系统只读：只有明确声明可写的位置才可写。
+ProtectSystem=strict
+# 隐藏 /home、/root、/run/user（服务不需要家目录）。
+ProtectHome=yes
+# 私有 /tmp 与 /var/tmp（命名空间隔离，其他进程看不到）。
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+# 禁止修改 hostname/domainname。
+ProtectHostname=yes
+# 禁止服务创建新的挂载命名空间。
+RestrictNamespaces=yes
+
+# ---- 权限收缩 ---------------------------------------------------------------
+# 提权被彻底阻断：不允许 setuid/setgid 程序、不获取新特权。
+NoNewPrivileges=yes
+# 清空能力集 —— 默认监听 60000（高端口）不需要任何 capability。
+#
+# 若你改用特权端口（如 P2PS_LISTEN=:80），需要放开这一项：
+#   CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+#   AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+# 只允许 IPv4/IPv6/Unix 套接字（HTTP + WebSocket + SQLite 均走这些）。
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# 禁止 JIT 式可写可执行内存。
+# 本服务是 CGO_ENABLED=0 的纯 Go 二进制（无 JIT、无插件），该项安全。
+MemoryDenyWriteExecute=yes
+# 系统调用白名单：@system-service 覆盖网络/文件/时间等常规服务所需。
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# 只允许本机原生架构的 syscall（阻断 32 位兼容路径）。
+SystemCallArchitectures=native
+
+# ---- 资源限制 ---------------------------------------------------------------
+# 每会话两条 WebSocket（控制面 + 数据面），且成员上限默认 100，
+# 因此需要的文件描述符远小于此；给足余量以免高并发下 EMFILE。
+LimitNOFILE=65536
+# 注意：不要在这里设 MemoryMax。SQLite 页缓存与 Go 堆会随会话数增长，
+# 过早设限会让进程在 OOM 前被 systemd 直接杀掉，表现为「莫名重启」。
+# 需要限额时请先按实测峰值设定（见 DESIGN.md 的资源章节）。
+
+# ---- 日志 -------------------------------------------------------------------
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=p2psession
+
+[Install]
+WantedBy=multi-user.target

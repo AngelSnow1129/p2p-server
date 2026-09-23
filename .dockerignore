@@ -1,0 +1,22 @@
+.git
+.gitignore
+*.md
+.dockerignore
+Dockerfile
+docker-compose.yml
+.env
+.env.*
+!.env.example
+
+# 本地身份与密钥（切勿打进镜像）
+*.key
+*.pem
+identity.json
+.p2p-node/
+
+# 测试与临时产物
+e2e/
+**/*_test.go
+bin/
+dist/
+*.log
