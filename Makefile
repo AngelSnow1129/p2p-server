@@ -18,6 +18,8 @@ SHELL := /bin/bash
 # 二进制与包名。
 SERVER_BIN := p2psession-server
 CLIENT_BIN := p2p-node
+# systemd 单元/环境文件的服务名前缀（与 deploy/systemd 下文件名一致）。
+SERVICE_NAME := p2psession
 # Go 主包路径。
 SERVER_PKG := ./cmd/server
 CLIENT_PKG := ./cmd/p2p-node
@@ -126,6 +128,11 @@ dist: ## 构建全平台归档 + SHA256 校验和到 dist/
 			-ldflags '$(LDFLAGS)' -o "$$stage/$(CLIENT_BIN)$$ext" $(CLIENT_PKG) 2>>$(DISTDIR)/.err; then \
 			cp README.md "$$stage/" 2>/dev/null || true; \
 			cp VERSION "$$stage/" 2>/dev/null || true; \
+			mkdir -p "$$stage/deploy/systemd"; \
+			cp deploy/install.sh "$$stage/deploy/" 2>/dev/null || true; \
+			cp deploy/systemd/$(SERVICE_NAME).service \
+			   deploy/systemd/$(SERVICE_NAME).env.example \
+			   "$$stage/deploy/systemd/" 2>/dev/null || true; \
 			if [ "$$os" = "windows" ]; then \
 				(cd $(DISTDIR) && zip -qr "$$name.zip" "$$name"); \
 				rm -rf "$$stage"; \

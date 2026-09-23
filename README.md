@@ -21,29 +21,55 @@
 
 | 方式 | 适用 | 依赖 |
 |---|---|---|
-| **[二进制 + systemd](#11-二进制--systemd推荐)** | 生产、长期自托管 | 无（纯静态二进制） |
-| [手动跑二进制](#12-手动运行适合试用) | 试用、内网临时跑 | 无 |
-| [Docker](#13-docker备选) | 已有容器编排体系 | Docker |
+| **[一键安装（Releases）](#11-一键安装推荐从-github-releases)** | 生产、长期自托管 | 无（curl 即可） |
+| [从源码构建](#12-从源码构建安装) | 开发机、离线环境 | Go 1.25+ |
+| [手动跑二进制](#13-手动运行适合试用) | 试用、内网临时跑 | 无 |
+| [Docker](#14-docker备选) | 已有容器编排体系 | Docker |
 
-### 1.1 二进制 + systemd（推荐）
+### 1.1 一键安装（推荐，从 GitHub Releases）
+
+无需克隆仓库、无需 Go、无需 Docker——一条命令下载当前平台的静态二进制，
+校验 SHA256，交给 systemd 托管：
 
 ```bash
-# 1) 构建（需要 Go 1.25+；也可直接下载官方归档，见下）
-make dist                      # 产出 dist/ 下各平台归档 + SHA256SUMS
+curl -fsSL https://raw.githubusercontent.com/AngelSnow1129/p2p-server/main/deploy/install.sh | sudo bash
+```
 
-# 2) 安装（自动识别平台 → 校验 SHA256 → 建用户 → 装 unit → 启动 → 健康检查）
-sudo ./deploy/install.sh
+安装后确认：
 
-# 3) 确认
+```bash
 curl http://127.0.0.1:60000/v1/health        # → ok
 systemctl status p2psession
 ```
+
+常用命令（管道方式把参数传给脚本用 `bash -s --`）：
+
+```bash
+# 安装指定版本
+curl -fsSL https://raw.githubusercontent.com/AngelSnow1129/p2p-server/main/deploy/install.sh \
+  | sudo bash -s -- --version v1.0.0
+
+# 升级（只换二进制并重启，保留配置与数据）
+curl -fsSL https://raw.githubusercontent.com/AngelSnow1129/p2p-server/main/deploy/install.sh \
+  | sudo bash -s -- --upgrade
+
+# 卸载（保留数据与配置）
+curl -fsSL https://raw.githubusercontent.com/AngelSnow1129/p2p-server/main/deploy/install.sh \
+  | sudo bash -s -- --uninstall
+
+# 彻底卸载（连数据、配置、系统用户一起删）
+curl -fsSL https://raw.githubusercontent.com/AngelSnow1129/p2p-server/main/deploy/install.sh \
+  | sudo bash -s -- --uninstall --purge
+```
+
+> 不想直接管道执行？可以先下载再审计、运行：
+> `curl -fsSL -o install.sh <上面的 URL>` → `less install.sh` → `sudo bash install.sh`。
 
 安装脚本做的事（每一步都幂等，可重复执行）：
 
 | 步骤 | 内容 |
 |---|---|
-| 1–3 | 定位/下载归档 → **校验 SHA256** → 解包 |
+| 1–3 | 自动检测平台/版本 → 从 Releases 下载归档 → **校验 SHA256** → 解包 |
 | 4 | 创建系统用户 `p2psession`（无 shell、无家目录）与目录 |
 | 5 | 安装二进制到 `/usr/local/bin`，**替换前备份** |
 | 6 | 装 systemd unit 与 `/etc/p2psession/p2psession.env`（自动生成随机 `P2PS_TICKET_KEY`） |
@@ -51,29 +77,28 @@ systemctl status p2psession
 
 安全约束（都有实测）：
 
-- **校验和不匹配即中止安装**；拿不到校验和也拒绝安装（除非显式 `--insecure-skip-verify`）。
+- **校验和不匹配即中止安装**；release 缺 `SHA256SUMS` 也拒绝安装（除非显式 `--insecure-skip-verify`）。
 - **失败会回滚**：二进制替换前备份，启动或自检失败则还原。
 - **绝不覆盖既有配置**——升级时若覆盖 `/etc/p2psession/p2psession.env`，
   线上 `P2PS_TICKET_KEY` 会被抹掉，导致所有在途票据立即失效。
 
-其他用法：
+### 1.2 从源码构建安装
+
+需要 Go 1.25+。适合开发机、离线环境或想自己编译的场景：
 
 ```bash
-sudo ./deploy/install.sh --check          # 只获取+校验+解包，不改动系统（免 root）
-sudo ./deploy/install.sh --upgrade        # 只换二进制并重启，保留配置与数据
-sudo ./deploy/install.sh --url <归档URL>   # 从网络安装（自动尝试同目录 SHA256SUMS）
-sudo ./deploy/install.sh --uninstall      # 卸载服务与二进制（保留数据与配置）
-sudo ./deploy/install.sh --uninstall --purge   # 连带删除数据、配置与用户
+make dist                      # 产出 dist/ 下各平台归档 + SHA256SUMS
+sudo ./deploy/install.sh       # 检测到本地 dist/ 会优先使用，无需联网
 ```
 
-不想自己编译？下载预编译归档后本地安装：
+其他本地用法：
 
 ```bash
-# 归档内已含二进制 + README + VERSION
-sudo ./deploy/install.sh --url https://github.com/<owner>/<repo>/releases/download/v1.0.0/p2psession-1.0.0-linux-amd64.tar.gz
+sudo ./deploy/install.sh --check                 # 只获取+校验+解包，不改动系统（免 root）
+sudo ./deploy/install.sh --from /path/x.tar.gz   # 指定本地归档安装
 ```
 
-### 1.2 手动运行（适合试用）
+### 1.3 手动运行（适合试用）
 
 ```bash
 make build                     # 产出 bin/p2psession-server、bin/p2p-node
@@ -92,7 +117,7 @@ P2PS_STORAGE_BACKEND=sqlite P2PS_SQLITE_PATH=./data/p2psession.db ./bin/p2psessi
 go run ./cmd/server
 ```
 
-### 1.3 Docker（备选）
+### 1.4 Docker（备选）
 
 已有容器编排体系时可用；否则**二进制更简单**（不需要 Docker daemon、
 不需要拉基础镜像，安装包只有几 MB）。
@@ -110,7 +135,7 @@ echo 'P2PS_STORAGE_BACKEND=memory' >> .env
 docker compose up -d
 ```
 
-### 1.4 带公网入口（Cloudflare 隧道，零账号）
+### 1.5 带公网入口（Cloudflare 隧道，零账号）
 
 下面以 Docker 为例；**跑二进制时把 `--url http://relay:60000` 换成
 `--url http://127.0.0.1:60000` 直接执行 `cloudflared` 即可。**

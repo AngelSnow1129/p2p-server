@@ -1,0 +1,62 @@
+# 推送形如 v1.0.0 的 tag 时，在 GitHub Releases 构建并上传多平台二进制。
+#
+# 产物命名与本地 `make dist` 完全一致（p2psession-<ver>-<os>-<arch>.tar.gz），
+# 且每个 release 附一份 SHA256SUMS —— deploy/install.sh 默认强制校验它。
+#
+# 版本号由 Makefile 从 VERSION 文件读取，因此打 tag 前需让 VERSION 与 tag 一致
+# （见 README 的发布步骤）。
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'   # 预发布，如 v1.0.0-rc1
+  # 允许在 Actions 页面手动重跑（不重新打 tag）。
+  workflow_dispatch:
+
+permissions:
+  contents: write   # softprops/action-gh-release 创建/上传 release 所需
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Build archives and checksums
+        env:
+          # 用触发的 tag 作为版本号，覆盖 Makefile 从 VERSION 文件读到的值。
+          # 这样 release 资产名里的版本一定等于 tag，不会出现二者漂移。
+          VERSION: ${{ github.ref_name }}
+        run: make dist
+
+      - name: Sanity check archives
+        run: |
+          set -euo pipefail
+          echo "== dist 产物 =="
+          ls -lh dist/
+          echo "== 校验和自检 =="
+          (cd dist && sha256sum -c SHA256SUMS)
+          echo "== linux/amd64 归档必须含 systemd unit =="
+          tar tzf "dist/p2psession-${GITHUB_REF_NAME}-linux-amd64.tar.gz" \
+            | grep -q 'deploy/systemd/p2psession.service'
+
+      - name: Create GitHub Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          # 预发布 tag（含连字符，如 -rc1）标记为 prerelease。
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS

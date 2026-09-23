@@ -1711,12 +1711,36 @@ unit 可用 `systemd-analyze verify` 校验。**踩坑记录**：
 看似生效只因 `[Service]` 里保留了一个已废弃的同名别名。
 两项都写在 `[Unit]` 才是面向未来的正确写法。
 
-### 15.5 安装脚本
+### 15.5 安装脚本（网络引导）
 
-`deploy/install.sh` 把「校验 → 建用户 → 装二进制 → 装 unit → 启动 → 自检」
-串成一条命令。三条设计原则（按重要性排序）：
+`deploy/install.sh` 是**唯一安装入口**，同时支持两种来源：
 
-1. **校验和不匹配即中止安装**。拿不到 `SHA256SUMS` 也**拒绝安装**，
+1. **网络引导（主路径）**：脚本自动检测 `<os>/<arch>`，查询最新 release
+   的 `tag_name`，从 GitHub Releases 下载对应归档与 `SHA256SUMS`；
+2. **本地构建（开发/离线）**：在仓库内运行时优先使用本地 `dist/`，
+   也支持 `--from <归档>`。
+
+一键命令：
+
+```bash
+# 安装最新版
+curl -fsSL https://raw.githubusercontent.com/AngelSnow1129/p2p-server/main/deploy/install.sh | sudo bash
+# 升级（保留配置与数据）
+curl -fsSL .../install.sh | sudo bash -s -- --upgrade
+# 卸载（保留数据）/ 彻底卸载
+curl -fsSL .../install.sh | sudo bash -s -- --uninstall [--purge]
+```
+
+> 管道方式传参必须用 `bash -s -- <参数>`：`curl | sudo bash` 里 bash 的
+> 位置参数是 `-s`，直接在末尾追加 `--upgrade` 不会被脚本收到。
+
+**unit / env 随归档分发**，不依赖系统装有 git 或拉取整个仓库：
+`make dist` 把 `deploy/install.sh` 与 `deploy/systemd/*` 一并打进归档，
+脚本解包后用 `locate_asset` 在归档目录里定位（仓库路径仅作本地回退）。
+
+三条设计原则（按重要性排序）：
+
+1. **校验和不匹配即中止安装**。release 缺 `SHA256SUMS` 也**拒绝安装**，
    而不是静默跳过——「无法验证」与「验证通过」必须区分对待。
    确实要跳过需显式 `--insecure-skip-verify`（会大声警告）。
 2. **失败不留半装状态**。二进制替换前备份；若新二进制 `--version`
@@ -1729,23 +1753,55 @@ unit 可用 `systemd-analyze verify` 校验。**踩坑记录**：
 
 | 场景 | 结果 |
 |---|---|
-| 全新安装 | ✓ 服务 active，健康检查通过 |
+| 全新安装（本地归档） | ✓ 服务 active，健康检查通过 |
 | `--upgrade` | ✓ 二进制更新，`P2PS_TICKET_KEY` 与数据库均未被改动 |
-| `--uninstall` | ✓ 服务与二进制移除，数据与配置保留 |
+| `--uninstall` / `--purge` | ✓ 服务/二进制移除；purge 连带删数据/配置/用户 |
 | 重复 `--uninstall`（幂等） | ✓ exit 0，不报错 |
 | 篡改归档 | ✓ 中止安装，exit 1 |
 | 缺失 `SHA256SUMS` | ✓ 拒绝安装，exit 1 |
 | `--check`（免 root） | ✓ 只校验不改动系统 |
 
-**踩坑记录（两个都真实踩到）**：
+**踩坑记录（都真实踩到）**：
 
 - `[ -f x ] && Y=z` 作为分支最后一条命令时，条件为假会让整个分支
-  返回非零，`set -e` 随即**静默退出脚本**（用户看不到任何错误）。
-  必须改写为 `if`。
+  返回非零，`set -e` 随即**静默退出脚本**。必须改写为 `if`。
 - **EXIT trap 的返回值会覆盖脚本退出码**。清理函数若以
   `[ -n "$X" ] && rm ...` 结尾，未设该变量的分支（如卸载流程）返回 1，
-  使**成功的卸载在调用方看来是失败**（exit 1）。清理函数末尾必须
-  `return 0`。
+  使**成功的卸载在调用方看来是失败**（exit 1）。清理函数末尾必须 `return 0`。
+- **Makefile 引用了未定义变量导致归档缺文件**：打包时写
+  `cp deploy/systemd/$(SERVICE_NAME).service ...`，但 Makefile 只定义了
+  `SERVER_BIN`，`SERVICE_NAME` 展开为空，cp 失败又被 `2>/dev/null || true`
+  吞掉——归档里出现空的 `deploy/systemd/` 目录却没有 unit。
+  修复：在 Makefile 显式定义 `SERVICE_NAME := p2psession`。
+
+### 15.5.1 发布流程（GitHub Actions）
+
+`.github/workflows/release.yml` 在推送 `vX.Y.Z` 形式的 tag 时触发：
+
+1. 用 `VERSION=${github.ref_name}` 覆盖 Makefile 的版本变量，
+   保证资产名里的版本**恒等于 tag**，不会与 `VERSION` 文件漂移；
+2. `make dist` 产出 6 平台归档 + `SHA256SUMS`；
+3. 自检：`sha256sum -c` 全过，且 linux/amd64 归档内必须含
+   `deploy/systemd/p2psession.service`（防止上面那个「归档缺文件」回归）；
+4. `softprops/action-gh-release` 创建 Release 并上传全部资产；
+   tag 含连字符（如 `v1.0.0-rc1`）自动标为 prerelease。
+
+日常质量门禁由 `.github/workflows/ci.yml` 负责（push/PR 跑 build、vet、
+gofmt、`go test -race`）。
+
+发布操作：
+
+```bash
+# 1) 让 VERSION 与将要打的 tag 一致
+echo "1.0.0" > VERSION
+git commit -am "chore: release v1.0.0"
+# 2) 打注解 tag 并推送，触发 release.yml
+git tag -a v1.0.0 -m "v1.0.0"
+git push origin main --tags
+# 3) 观察
+gh run watch
+gh release view v1.0.0
+```
 
 ### 15.6 运维手册
 

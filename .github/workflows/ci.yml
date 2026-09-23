@@ -1,0 +1,47 @@
+# 每次推送到 main 或发 PR 时跑构建/静态检查/测试，防止主分支被破坏。
+# release.yml 只在打 tag 时跑；这里负责日常质量门禁。
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: gofmt check
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "以下文件未 gofmt（本地运行 make fmt）："
+            echo "$out"
+            exit 1
+          fi
+
+      - name: Tests with race detector
+        run: go test -race -count=1 ./...
